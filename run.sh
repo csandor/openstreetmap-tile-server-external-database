@@ -87,7 +87,7 @@ if [ "$1" == "import" ]; then
     fi
 
     # Import data
-    osm2pgsql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" \
+    osm2pgsql -H "$PGHOST" -P "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" \
       --create --slim -G --hstore  \
       --tag-transform-script /data/style/${NAME_LUA:-openstreetmap-carto.lua}  \
       --number-processes ${THREADS:-4}  \
