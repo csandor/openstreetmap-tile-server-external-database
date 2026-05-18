@@ -2,22 +2,24 @@
 
 set -euo pipefail
 
-function createPostgresConfig() {
-  cp /etc/postgresql/$PG_VERSION/main/postgresql.custom.conf.tmpl /etc/postgresql/$PG_VERSION/main/conf.d/postgresql.custom.conf
-  sudo -u postgres echo "autovacuum = $AUTOVACUUM" >> /etc/postgresql/$PG_VERSION/main/conf.d/postgresql.custom.conf
-  cat /etc/postgresql/$PG_VERSION/main/conf.d/postgresql.custom.conf
-}
-
-function setPostgresPassword() {
-    sudo -u postgres psql -c "ALTER USER renderer PASSWORD '${PGPASSWORD:-renderer}'"
-}
+# PostgreSQL connection parameters (required for remote database)
+export PGHOST="${PGHOST:-localhost}"
+export PGDATABASE="${PGDATABASE:-osm}"
+export PGUSER="${PGUSER:-renderer}"
+export PGPASSWORD="${PGPASSWORD:-renderer}"
+export PGPORT="${PGPORT:-5432}"
 
 if [ "$#" -ne 1 ]; then
     echo "usage: <import|run>"
     echo "commands:"
     echo "    import: Set up the database and import /data/region.osm.pbf"
     echo "    run: Runs Apache and renderd to serve tiles at /tile/{z}/{x}/{y}.png"
-    echo "environment variables:"
+    echo "environment variables (or .env file):"
+    echo "    PGHOST: PostgreSQL server host (required)"
+    echo "    PGPORT: PostgreSQL server port (default: 5432)"
+    echo "    PGDATABASE: PostgreSQL database name (default: gis)"
+    echo "    PGUSER: PostgreSQL username (default: renderer)"
+    echo "    PGPASSWORD: PostgreSQL password (default: renderer)"
     echo "    THREADS: defines number of threads used for importing / tile rendering"
     echo "    UPDATES: consecutive updates (enabled/disabled)"
     echo "    NAME_LUA: name of .lua script to run as part of the style"
@@ -41,24 +43,13 @@ if [ ! -f /data/style/mapnik.xml ]; then
 fi
 
 if [ "$1" == "import" ]; then
-    # Ensure that database directory is in right state
-    mkdir -p /data/database/postgres/
-    chown renderer: /data/database/
-    chown -R postgres: /var/lib/postgresql /data/database/postgres/
-    if [ ! -f /data/database/postgres/PG_VERSION ]; then
-        sudo -u postgres /usr/lib/postgresql/$PG_VERSION/bin/pg_ctl -D /data/database/postgres/ initdb -o "--locale C.UTF-8"
-    fi
+    echo "Using remote PostgreSQL at $PGHOST:$PGPORT"
 
-    # Initialize PostgreSQL
-    createPostgresConfig
-    service postgresql start
-    sudo -u postgres createuser renderer
-    sudo -u postgres createdb -E UTF8 -O renderer gis
-    sudo -u postgres psql -d gis -c "CREATE EXTENSION postgis;"
-    sudo -u postgres psql -d gis -c "CREATE EXTENSION hstore;"
-    sudo -u postgres psql -d gis -c "ALTER TABLE geometry_columns OWNER TO renderer;"
-    sudo -u postgres psql -d gis -c "ALTER TABLE spatial_ref_sys OWNER TO renderer;"
-    setPostgresPassword
+    # Create database extensions
+    psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c "CREATE EXTENSION IF NOT EXISTS postgis;"
+    psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c "CREATE EXTENSION IF NOT EXISTS hstore;"
+    psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c "ALTER TABLE IF EXISTS geometry_columns OWNER TO $PGUSER;"
+    psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c "ALTER TABLE IF EXISTS spatial_ref_sys OWNER TO $PGUSER;"
 
     # Download Luxembourg as sample if no data is provided
     if [ ! -f /data/region.osm.pbf ] && [ -z "${DOWNLOAD_PBF:-}" ]; then
@@ -96,7 +87,8 @@ if [ "$1" == "import" ]; then
     fi
 
     # Import data
-    sudo -u renderer osm2pgsql -d gis --create --slim -G --hstore  \
+    osm2pgsql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" \
+      --create --slim -G --hstore  \
       --tag-transform-script /data/style/${NAME_LUA:-openstreetmap-carto.lua}  \
       --number-processes ${THREADS:-4}  \
       -S /data/style/${NAME_STYLE:-openstreetmap-carto.style}  \
@@ -112,60 +104,35 @@ if [ "$1" == "import" ]; then
 
     # Create indexes
     if [ -f /data/style/${NAME_SQL:-indexes.sql} ]; then
-        sudo -u postgres psql -d gis -f /data/style/${NAME_SQL:-indexes.sql}
+        psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -f /data/style/${NAME_SQL:-indexes.sql}
     fi
 
     #Import external data
     chown -R renderer: /home/renderer/src/ /data/style/
     if [ -f /data/style/scripts/get-external-data.py ] && [ -f /data/style/external-data.yml ]; then
+        sed -i "s/^[[:space:]]*database:.*/  database: $PGDATABASE/" /data/style/external-data.yml
         sudo -E -u renderer python3 /data/style/scripts/get-external-data.py -c /data/style/external-data.yml -D /data/style/data
     fi
 
     # Register that data has changed for mod_tile caching purposes
     sudo -u renderer touch /data/database/planet-import-complete
 
-    service postgresql stop
-
     exit 0
 fi
 
 if [ "$1" == "run" ]; then
+    echo "Using remote PostgreSQL at $PGHOST:$PGPORT"
+
     # Clean /tmp
     rm -rf /tmp/*
-
-    # migrate old files
-    if [ -f /data/database/PG_VERSION ] && ! [ -d /data/database/postgres/ ]; then
-        mkdir /data/database/postgres/
-        mv /data/database/* /data/database/postgres/
-    fi
-    if [ -f /nodes/flat_nodes.bin ] && ! [ -f /data/database/flat_nodes.bin ]; then
-        mv /nodes/flat_nodes.bin /data/database/flat_nodes.bin
-    fi
-    if [ -f /data/tiles/data.poly ] && ! [ -f /data/database/region.poly ]; then
-        mv /data/tiles/data.poly /data/database/region.poly
-    fi
-
-    # sync planet-import-complete file
-    if [ -f /data/tiles/planet-import-complete ] && ! [ -f /data/database/planet-import-complete ]; then
-        cp /data/tiles/planet-import-complete /data/database/planet-import-complete
-    fi
-    if ! [ -f /data/tiles/planet-import-complete ] && [ -f /data/database/planet-import-complete ]; then
-        cp /data/database/planet-import-complete /data/tiles/planet-import-complete
-    fi
-
-    # Fix postgres data privileges
-    chown -R postgres: /var/lib/postgresql/ /data/database/postgres/
 
     # Configure Apache CORS
     if [ "${ALLOW_CORS:-}" == "enabled" ] || [ "${ALLOW_CORS:-}" == "1" ]; then
         echo "export APACHE_ARGUMENTS='-D ALLOW_CORS'" >> /etc/apache2/envvars
     fi
 
-    # Initialize PostgreSQL and Apache
-    createPostgresConfig
-    service postgresql start
+    # Start Apache
     service apache2 restart
-    setPostgresPassword
 
     # Configure renderd threads
     sed -i -E "s/num_threads=[0-9]+/num_threads=${THREADS:-4}/g" /etc/renderd.conf
@@ -189,8 +156,6 @@ if [ "$1" == "run" ]; then
     sudo -u renderer renderd -f -c /etc/renderd.conf &
     child=$!
     wait "$child"
-
-    service postgresql stop
 
     exit 0
 fi
