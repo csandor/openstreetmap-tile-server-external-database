@@ -39,6 +39,9 @@ fi
 # carto build
 if [ ! -f /data/style/mapnik.xml ]; then
     cd /data/style/
+    if [ "$1" == "import" ]; then
+        sed -i "s|\(\s*\)dbname: \"gis\"|\1dbname: \"${PGDATABASE}\"\n\1host: \"${PGHOST}\"\n\1user: \"${PGUSER}\"\n\1password: \"${PGPASSWORD}\"|g" ${NAME_MML:-project.mml}
+    fi
     carto ${NAME_MML:-project.mml} > mapnik.xml
 fi
 
