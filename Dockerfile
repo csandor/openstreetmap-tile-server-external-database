@@ -141,6 +141,7 @@ RUN chown -R postgres:postgres /var/lib/postgresql \
 RUN mkdir -p /run/renderd/ \
   &&  mkdir  -p  /data/database/  \
   &&  mkdir  -p  /data/style/  \
+  &&  mkdir  -p  /data/tiles/ \
   &&  mkdir  -p  /home/renderer/src/  \
   &&  chown  -R  renderer:  /data/  \
   &&  chown  -R  renderer:  /home/renderer/src/  \
